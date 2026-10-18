@@ -1,4 +1,6 @@
 """Loading WeatherBench 2 ERA5 data into (time, channel, lat, lon) arrays."""
+from pathlib import Path
+
 import numpy as np
 import torch
 import xarray as xr
@@ -11,9 +13,27 @@ CLIMATOLOGY_64X32 = "gs://weatherbench2/datasets/era5-hourly-climatology/1990-20
 DEFAULT_CHANNELS = ["2m_temperature", "geopotential@500"]
 
 
-def open_era5(url=ERA5_64X32):
-    """Open the WB2 ERA5 Zarr store lazily (public bucket, no credentials needed)."""
-    return xr.open_zarr(url, storage_options={"token": "anon"})
+def open_era5(path=ERA5_64X32):
+    """Open ERA5 lazily: the public WB2 bucket (no credentials needed) or a local cache from download_era5.py."""
+    if path.startswith("gs://"):
+        return xr.open_zarr(path, storage_options={"token": "anon"})
+    local = Path(path)
+    if (local / "static.zarr").exists():
+        # A download_era5.py cache: one store per year plus the static fields.
+        years = sorted(p for p in local.glob("*.zarr") if p.stem.isdigit())
+        ds = xr.open_mfdataset(years, engine="zarr", combine="nested", concat_dim="time",
+                               data_vars="minimal", coords="minimal", compat="override")
+        return xr.merge([ds, xr.open_zarr(local / "static.zarr")])
+    return xr.open_zarr(path)
+
+
+def get_device():
+    """CUDA on Colab/Kaggle, Apple-silicon GPU (MPS) on a Mac, otherwise CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def parse_channel(channel):

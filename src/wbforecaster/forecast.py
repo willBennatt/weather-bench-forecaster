@@ -1,4 +1,7 @@
 """Training, autoregressive rollout, and export to the WeatherBench 2 forecast format."""
+import copy
+import time
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,43 +23,93 @@ UNITS = {
 }
 
 
-def train_one_step(model, train_tensor, device, epochs=5, batch_size=16, lr=1e-3):
-    """Fit the model to predict the next 6-hour state with MSE loss on normalized data."""
+def train_one_step(model, train_tensor, device, epochs=5, batch_size=16, lr=1e-3,
+                   val_tensor=None, patience=None, on_best=None):
+    """Fit the model to predict the next 6-hour state with MSE loss on normalized data.
+
+    The learning rate follows a cosine decay from `lr` to `lr / 100` over all training steps:
+    large steps early to make fast progress, small steps late to settle into a minimum.
+
+    If `val_tensor` is given, the validation loss is computed after every epoch and the weights
+    with the lowest validation loss are restored at the end. `on_best(model, epoch, val_loss)`
+    is called each time the validation loss improves (e.g. to save a checkpoint), and training
+    stops early after `patience` epochs without improvement.
+    """
     loader = DataLoader(OneStepDataset(train_tensor), batch_size=batch_size, shuffle=True)
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(loader), eta_min=lr / 100)
     criterion = nn.MSELoss()
 
-    model.train()
+    best_loss, best_state, epochs_since_best = float("inf"), None, 0
     for epoch in range(epochs):
+        model.train()
         total_loss = 0.0
+        start = time.time()
         for x_batch, y_batch in loader:
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
             loss = criterion(model(x_batch), y_batch)
             loss.backward()
             optimizer.step()
+            scheduler.step()
             total_loss += loss.item()
-        print(f"Epoch {epoch + 1}/{epochs} - Loss: {total_loss / len(loader):.5f}")
+        message = f"Epoch {epoch + 1}/{epochs} - Loss: {total_loss / len(loader):.5f}"
+
+        if val_tensor is not None:
+            val_loss = evaluate_loss(model, val_tensor, device, criterion)
+            message += f" - Val loss: {val_loss:.5f}"
+            if val_loss < best_loss:
+                best_loss, epochs_since_best = val_loss, 0
+                best_state = copy.deepcopy(model.state_dict())
+                message += " (best)"
+                if on_best:
+                    on_best(model, epoch + 1, val_loss)
+            else:
+                epochs_since_best += 1
+        print(f"{message} - LR: {scheduler.get_last_lr()[0]:.1e} - {time.time() - start:.0f}s", flush=True)
+
+        if patience is not None and epochs_since_best >= patience:
+            print(f"Stopping early: no validation improvement for {patience} epochs")
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"Restored best weights (val loss {best_loss:.5f})")
     return model
 
 
 @torch.no_grad()
-def rollout(model, test_raw, normalizer, lead_steps, device):
-    """Run the model autoregressively from every test time.
+def evaluate_loss(model, data_tensor, device, criterion, batch_size=256):
+    """Average one-step loss over a dataset, without updating the model."""
+    model.eval()
+    loader = DataLoader(OneStepDataset(data_tensor), batch_size=batch_size)
+    total = 0.0
+    for x_batch, y_batch in loader:
+        x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+        total += criterion(model(x_batch), y_batch).item() * len(x_batch)
+    return total / len(loader.dataset)
+
+
+@torch.no_grad()
+def rollout(model, test_raw, normalizer, lead_steps, device, init_indices=None, batch_size=64):
+    """Run the model autoregressively from each initial time in `init_indices` (default: all that fit).
 
     Returns an array of shape (num_inits, lead_steps + 1, C, Lat, Lon) in physical units,
     where lead index 0 is the initial condition itself.
     """
-    num_inits = len(test_raw) - lead_steps
-    forecast = np.zeros((num_inits, lead_steps + 1, *test_raw.shape[1:]), dtype=np.float32)
+    if init_indices is None:
+        init_indices = np.arange(len(test_raw) - lead_steps)
+    forecast = np.zeros((len(init_indices), lead_steps + 1, *test_raw.shape[1:]), dtype=np.float32)
     model.eval()
-    for i in range(num_inits):
-        state = torch.tensor(normalizer.normalize(test_raw[i : i + 1]), dtype=torch.float32, device=device)
-        forecast[i, 0] = test_raw[i]
+    # Forecasts from different start times are independent, so run them in batches.
+    for b in range(0, len(init_indices), batch_size):
+        idx = init_indices[b : b + batch_size]
+        forecast[b : b + len(idx), 0] = test_raw[idx]
+        state = torch.tensor(normalizer.normalize(test_raw[idx]), dtype=torch.float32, device=device)
         for step in range(1, lead_steps + 1):
             state = model(state)
-            forecast[i, step] = normalizer.denormalize(state.cpu().numpy())[0]
+            forecast[b : b + len(idx), step] = normalizer.denormalize(state.cpu().numpy())
     return forecast
 
 
@@ -64,7 +117,7 @@ def to_wb2_dataset(forecast, channels, init_times, latitudes, longitudes, step_h
     """Package a rollout as an xarray Dataset with WB2 dims (time, prediction_timedelta, [level], lat, lon)."""
     lead_times = [np.timedelta64(step * step_hours, "h") for step in range(forecast.shape[1])]
     coords = {
-        "time": init_times[: forecast.shape[0]],
+        "time": init_times,
         "prediction_timedelta": lead_times,
         "latitude": latitudes,
         "longitude": longitudes,

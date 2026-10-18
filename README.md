@@ -50,8 +50,10 @@ The CNNs clearly beat the linear model. **But at 24 h they're still worse than s
 │   ├── models.py     # PeriodicConv2d, Linear / Simple CNN / Complex CNN
 │   └── forecast.py   # training loop, autoregressive rollout, export to WB2 Zarr format
 ├── scripts/
+│   ├── download_era5.py        # cache a subset of ERA5 locally (one Zarr store per year)
 │   ├── train_and_forecast.py   # CLI: train → rollout → write forecast .zarr
-│   └── evaluate.sh             # run the official WB2 evaluation (optionally with baselines)
+│   ├── evaluate.sh             # run the official WB2 evaluation (optionally with baselines)
+│   └── make_persistence.py     # build a persistence baseline forecast (used by evaluate.sh)
 └── docs/
     ├── ROADMAP.md    # learning plan
     ├── WEBSITE.md    # how to serve forecasts on a website
@@ -74,11 +76,31 @@ token = userdata.get("GH_TOKEN")
 !git clone -q https://github.com/google-research/weatherbench2.git && pip install -q -e weatherbench2
 ```
 
-### Locally or in Colab via the CLI
+### On a laptop (fine for 2-variable models; Apple-silicon GPU is used automatically)
+
+Use Python 3.11 or 3.12 (`apache_beam`, needed by the WB2 evaluation, lags behind new Python versions):
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+```
 
 ```bash
 pip install -e .
 ```
+
+```bash
+git clone https://github.com/google-research/weatherbench2.git && pip install -e weatherbench2 absl-py
+```
+
+Download the data once instead of streaming it on every run. 1979–2020 for two channels takes ~15 minutes and ~0.8 GB of disk; re-running resumes:
+
+```bash
+python scripts/download_era5.py --channels 2m_temperature geopotential@500 --start-year 1979 --end-year 2020 --output data/era5_64x32
+```
+
+### Training and forecasting (CLI)
+
+Defaults stream from the WB2 bucket; add `--data data/era5_64x32` to use the local cache:
 
 ```bash
 python scripts/train_and_forecast.py --model simple --output forecast_simple.zarr
@@ -90,13 +112,19 @@ Pick variables with `--channels` (pressure levels use `var@level`):
 python scripts/train_and_forecast.py --model complex --channels 2m_temperature geopotential@500 temperature@850 --epochs 10 --output forecast_complex.zarr --checkpoint complex.pt
 ```
 
-Evaluate with the official WeatherBench 2 script. It needs a checkout of `weatherbench2` installed with `pip install -e`. `BASELINES=1` also scores persistence and climatology:
+For the standard WB2 setup, add a validation period and 10-day forecasts from 00z/12z only. The learning rate decays over training, the checkpoint keeps the epoch with the best validation loss, and `--patience` stops early:
+
+```bash
+python scripts/train_and_forecast.py --data data/era5_64x32 --model simple --train-start 1979-01-01 --train-end 2015-12-31 --val-start 2016-01-01 --val-end 2017-12-31 --test-start 2020-01-01 --test-end 2020-12-31 --lead-steps 40 --init-hours 0 12 --epochs 5 --patience 2 --output output/forecast_simple.zarr --checkpoint checkpoints/simple.pt
+```
+
+Evaluate with the official WeatherBench 2 script. It needs a checkout of `weatherbench2` installed with `pip install -e`, plus `absl-py`. `BASELINES=1` also scores persistence and climatology for the same start times:
 
 ```bash
 BASELINES=1 scripts/evaluate.sh forecast_simple.zarr eval_results_simple/ 2m_temperature,geopotential 500
 ```
 
-Results are written to `eval_results_simple/deterministic.nc`.
+Results are written to `eval_results_simple/deterministic.nc`, with the baselines in `eval_results_simple/persistence/` and `eval_results_simple/climatology/`. The persistence forecast is also saved next to your forecast (`forecast_simple_persistence.zarr`, same size as the forecast).
 
 ## Data and acknowledgements
 

@@ -42,7 +42,8 @@ Here are the published WeatherBench 2 scores at the same 64×32 resolution (glob
 - Adopt the standard WB2 splits: **train 1979–2015, validate 2016–2017, test 2020** (with 00z and 12z initializations, so 732 forecasts). Pick models by validation score. Look at the test set only for the final numbers.
 - Extend rollouts to **10 days (40 steps)**. Error growth over days 3–10 is where weather becomes interesting.
 - Also look at **ACC** (anomaly correlation coefficient) for Z500. Meteorologists treat ACC > 0.6 as the threshold of "useful skill".
-- **Cache the data.** Streaming from GCS on every run is slow. Download once to Google Drive as `.npy` or a local Zarr store, then load from Drive.
+- **Cache the data.** Streaming from GCS on every run is slow. Use `scripts/download_era5.py` once (to your laptop, or to Google Drive in Colab), then pass `--data` to the training script.
+- **Phase 1 runs fine on a laptop.** The 2-variable data for 1979–2020 is under 1 GB, the small CNNs train on an Apple-silicon GPU (`mps`), and the WB2 evaluation installs on Python 3.12. Move to Colab/Kaggle from Phase 3.
 
 **Done when:** you have a plot of your model vs persistence vs climatology over a full year, and you can explain why climatology's RMSE is flat.
 
