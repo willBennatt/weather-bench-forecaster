@@ -34,10 +34,10 @@ Download the data and cache it in [data/era5_64x32](../../data/era5_64x32/) by r
 python scripts/download_era5.py --channels 2m_temperature geopotential@500 --start-year 1979 --end-year 2020 --output data/era5_64x32
 ```
 
-Train the simple model on the full data with 48 hour windows:
+Train the simple model on the full data with 10 day windows:
 
 ```sh
-python scripts/train_and_forecast.py --model simple --channels 2m_temperature geopotential@500 --epochs 3 --train-start 1979-01-01 --train-end 2015-12-31 --test-start 2020-01-01 --test-end 2020-12-31 --lead-steps 40 --output output/forecast_simple_2mtemp_z500.zarr --checkpoint checkpoints/simple_2mtemp_z500.pt --data data/era5_64x32
+python scripts/train_and_forecast.py --data data/era5_64x32 --model simple --train-start 1979-01-01 --train-end 2015-12-31 --val-start 2016-01-01 --val-end 2017-12-31 --test-start 2020-01-01 --test-end 2020-12-31 --lead-steps 40 --init-hours 0 12 --epochs 5 --patience 2 --output output/forecast_simple_2mtemp_z500.zarr --checkpoint checkpoints/simple_2mtemp_z500.pt
 ```
 
 Evaluate:
