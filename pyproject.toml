@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wbforecaster"
+version = "0.1.0"
+description = "Learning ML weather forecasting on WeatherBench 2"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "torch",
+    "xarray",
+    "zarr",
+    "gcsfs",
+    "fsspec",
+    "tqdm",
+    "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
