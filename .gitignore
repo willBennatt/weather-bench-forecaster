@@ -4,7 +4,7 @@
 *.pt
 *.npy
 eval_results*/
-data/
+/data/
 checkpoints/
 
 # Local clone of google-research/weatherbench2 used for evaluation

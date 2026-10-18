@@ -6,6 +6,8 @@ Everything runs on free GPUs (Google Colab T4 or Kaggle). The goal is to underst
 
 ## How it works
 
+New to the data? [`docs/DATA.md`](docs/DATA.md) shows the grid, variables, Zarr layout and the actual arrays with pictures.
+
 1. **Data.** WeatherBench 2 hosts ERA5 regridded to a coarse **64 × 32 global grid (5.625°, ~600 km cells) every 6 hours**, from 1959 to 2023, in a public Zarr store on Google Cloud Storage. We stream a subset of variables and stack them into a `(time, channel, lat, lon)` array, e.g. 2 m temperature and 500 hPa geopotential.
 2. **Normalization.** Each channel is z-scored with means and standard deviations computed on the training years only.
 3. **Model.** A convolutional network maps the state at time *t* to the state at *t* + 6 h. The convolutions use **periodic padding in longitude**, because the globe wraps around at 0°/360°. The CNNs are *residual*: they predict the change, not the full field.
@@ -53,8 +55,10 @@ The CNNs clearly beat the linear model. **But at 24 h they're still worse than s
 │   ├── download_era5.py        # cache a subset of ERA5 locally (one Zarr store per year)
 │   ├── train_and_forecast.py   # CLI: train → rollout → write forecast .zarr
 │   ├── evaluate.sh             # run the official WB2 evaluation (optionally with baselines)
-│   └── make_persistence.py     # build a persistence baseline forecast (used by evaluate.sh)
+│   ├── make_persistence.py     # build a persistence baseline forecast (used by evaluate.sh)
+│   └── make_data_figures.py    # regenerate the figures in docs/DATA.md
 └── docs/
+    ├── DATA.md       # the WB2 data and what the arrays look like (with figures)
     ├── ROADMAP.md    # learning plan
     ├── WEBSITE.md    # how to serve forecasts on a website
     └── images/
