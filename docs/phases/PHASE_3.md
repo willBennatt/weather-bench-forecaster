@@ -36,13 +36,24 @@ Both scripts skip work that's already done, so they can be resumed after an inte
 
 Train with `--data data/era5_64x32_all_channels --memmap data/memmap/era5_64x32_all_channels` plus the usual test, rollout and forcing flags.
 
-## Step 2: Train and Evaluate
+## Step 2: Improve the Code for More Channels
 
-Once the memmaps are created, train the model. The rollout now writes the forecast to the zarr one batch of start times at a time: a year of 10-day forecasts for 39 channels is ~10 GB, which wouldn't fit in memory all at once.:
+1. The rollout now writes the forecast to the zarr one batch of start times at a time: a year of 10-day forecasts for 39 channels is ~10 GB, which wouldn't fit in memory all at once.
+2. Skill curve plots were updated to take variable parameters so not all 39 channels need to be plotted. A new scorecard graph to match what WeatherBench has on their website and show multiple variables succinctly was also added.
+3. `hidden_dim` was turned into a parameter. The default 64 was chosen for two output parameters, but for 39, the model capacity needs to be more flexible.
+4. Per-variable loss weights. 
+5. Tendency normalization.
+
+
+## Step 3: Train and Evaluate
+
+Once the memmaps are created, train the model:
 
 ```sh
-python scripts/train_and_forecast.py --data data/era5_64x32_all_channels --memmap data/memmap/era5_64x32_all_channels --model simple --test-start 2020-01-01 --test-end 2020-12-31 --lead-steps 40 --init-hours 0 12 --epochs 5 --patience 2 --lat-weighted-loss --output output/phase3/forecast_simple_all_channels.zarr --checkpoint checkpoints/phase3/simple_all_channels.pt
+python scripts/train_and_forecast.py --data data/era5_64x32_all_channels --memmap data/memmap/era5_64x32_all_channels --model simple --test-start 2020-01-01 --test-end 2020-12-31 --lead-steps 40 --init-hours 0 12 --epochs 5 --patience 2 --pressure-weighted-loss --output output/phase3/forecast_simple_all_channels.zarr --checkpoint checkpoints/phase3/simple_all_channels.pt
 ```
+
+Could also try training with different model capacities to see how it affects the result.
 
 Then cache the new channels for evaluation:
 

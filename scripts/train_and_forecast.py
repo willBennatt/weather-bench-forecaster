@@ -40,6 +40,7 @@ def main():
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--patience", type=int, help="stop after this many epochs without validation improvement")
     p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--hidden-dim", type=int, default=64, help="hidden channels in the CNN (not used by --model linear)")
     p.add_argument("--lr", type=float, default=1e-3, help="initial learning rate (decays to lr/100)")
     p.add_argument("--output", default="my_forecast_64x32.zarr")
     p.add_argument("--checkpoint", help="path to save model weights + normalization stats (best validation epoch)")
@@ -47,7 +48,11 @@ def main():
                    help="train on the state alone, without solar/time/static forcing inputs (the Phase 1 setup)")
     p.add_argument("--lat-weighted-loss", action="store_true",
                    help="weight the loss by grid-cell area (cos latitude), matching how WB2 scores forecasts")
+    p.add_argument("--pressure-weighted-loss", action="store_true",
+                   help="also weight each channel by pressure level and surface variable, like GraphCast "
+                        "(implies --lat-weighted-loss)")
     args = p.parse_args()
+    args.lat_weighted_loss |= args.pressure_weighted_loss
 
     device = get_device()
     ds = open_era5(args.data)
@@ -87,7 +92,8 @@ def main():
         torch.save(
             {"model": args.model, "channels": args.channels, "in_channels": model_kwargs["in_channels"],
              "out_channels": model_kwargs["out_channels"], "forcings": forcing_names,
-             "lat_weighted_loss": args.lat_weighted_loss, "state_dict": model.state_dict(),
+             "hidden_dim": model_kwargs.get("hidden_dim"), "lat_weighted_loss": args.lat_weighted_loss,
+             "pressure_weighted_loss": args.pressure_weighted_loss, "state_dict": model.state_dict(),
              "mean": normalizer.mean, "std": normalizer.std, "epoch": epoch, "val_loss": val_loss},
             args.checkpoint,
         )
@@ -95,12 +101,15 @@ def main():
     forcing_names = [] if args.no_forcings else Forcings.names
     # The model sees the state followed by the forcing channels, and predicts only the state.
     model_kwargs = {"in_channels": len(args.channels) + len(forcing_names), "out_channels": len(args.channels)}
+    if args.model != "linear":  # a single convolution has no hidden layer
+        model_kwargs["hidden_dim"] = args.hidden_dim
     print(f"Training {args.model} on {device} with forcings: {forcing_names or 'none'}...")
     model = MODELS[args.model](**model_kwargs)
     model = train_one_step(
         model, train_tensor, forcings_for(train_times), device, args.epochs,
         args.batch_size, args.lr, val_tensor=val_tensor, val_forcing=val_forcing, patience=args.patience,
         latitudes=ds.latitude.values if args.lat_weighted_loss else None,
+        channels=args.channels if args.pressure_weighted_loss else None,
         on_best=save_checkpoint if args.checkpoint else None,
     )
     if args.checkpoint and val_tensor is None:

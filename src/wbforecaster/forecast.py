@@ -53,13 +53,55 @@ class LatWeightedMSE(nn.Module):
     def forward(self, prediction, target):
         return ((prediction - target) ** 2 * self.weights).mean()
 
+# Surface variables' weights relative to a pressure-level variable, following GraphCast: 2 m temperature
+# counts fully, the other surface fields at 0.1. Any surface variable not listed gets SURFACE_DEFAULT.
+SURFACE_WEIGHTS = {"2m_temperature": 1.0}
+SURFACE_DEFAULT = 0.1
+
+
+def channel_weights(channels):
+    """Per-channel loss weights, normalized to mean 1, following GraphCast.
+
+    A pressure-level channel is weighted by its pressure relative to the mean of the levels in use,
+    so 1000 hPa (near the surface) counts ~20x as much as 50 hPa (the stratosphere): the lower
+    atmosphere has more of the air's mass and most of the weather. Surface channels get
+    SURFACE_WEIGHTS. Without this, every channel counts equally, so 50 hPa matters as much as 850.
+
+    With the Phase 3 channels the 4 surface channels end up with ~4% of the loss (vs ~10% unweighted),
+    as in GraphCast: the near-surface levels (925, 1000 hPa) carry most of the same signal at high weight.
+    """
+    parsed = [parse_channel(channel) for channel in channels]
+    levels = [level for _, level in parsed if level is not None]
+    mean_level = np.mean(levels) if levels else 1.0
+    weights = np.array([level / mean_level if level is not None else SURFACE_WEIGHTS.get(var, SURFACE_DEFAULT)
+                        for var, level in parsed])
+    return weights / weights.mean()
+
+
+class LatAndPressureWeightedMSE(LatWeightedMSE):
+    """`LatWeightedMSE` with each channel also weighted by `channel_weights` (pressure level, surface variable).
+
+    Both sets of weights have mean 1, so the loss stays on the same scale as plain MSE.
+    """
+
+    def __init__(self, latitudes, channels):
+        super().__init__(latitudes)
+        weights = torch.tensor(channel_weights(channels), dtype=torch.float32)
+        # Shape (1, C, 1, 1) to broadcast over (batch, channel, lat, lon).
+        self.register_buffer("channel_weights", weights.view(1, -1, 1, 1))
+
+    def forward(self, prediction, target):
+        return ((prediction - target) ** 2 * self.weights * self.channel_weights).mean()
+
 
 def train_one_step(model, train_tensor, forcing_tensor, device, epochs=5, batch_size=16, lr=1e-3,
-                   val_tensor=None, val_forcing=None, patience=None, on_best=None, latitudes=None):
+                   val_tensor=None, val_forcing=None, patience=None, on_best=None, latitudes=None, channels=None):
     """Fit the model to predict the next 6-hour state with MSE loss on normalized data.
 
     If `latitudes` is given, the loss weights each latitude row by its area (`LatWeightedMSE`), as WB2
-    does when scoring; otherwise every grid cell counts equally.
+    does when scoring; otherwise every grid cell counts equally. If `channels` (names like
+    "geopotential@500") is given too, each channel is also weighted by pressure level and surface
+    variable (`LatAndPressureWeightedMSE`).
 
     `forcing_tensor` (and `val_forcing`) hold the forcings for the step starting at each time in
     `train_tensor` (and `val_tensor`), e.g. a `Forcings` over the same times, or None for no forcings.
@@ -76,7 +118,13 @@ def train_one_step(model, train_tensor, forcing_tensor, device, epochs=5, batch_
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(loader), eta_min=lr / 100)
-    criterion = (nn.MSELoss() if latitudes is None else LatWeightedMSE(latitudes)).to(device)
+    if latitudes is None:
+        criterion = nn.MSELoss()
+    elif channels is None:
+        criterion = LatWeightedMSE(latitudes)
+    else:
+        criterion = LatAndPressureWeightedMSE(latitudes, channels)
+    criterion = criterion.to(device)
 
     best_loss, best_state, epochs_since_best = float("inf"), None, 0
     for epoch in range(epochs):

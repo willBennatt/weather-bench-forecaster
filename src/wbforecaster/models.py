@@ -35,15 +35,15 @@ class SimpleWeatherNet(nn.Module):
     The residual adds the change to the state channels only: forcings are inputs, never outputs.
     """
 
-    def __init__(self, in_channels, out_channels, hidden_dim=64):
+    def __init__(self, in_channels, out_channels, hidden_dim=64, kernel_size=3, dilation=1):
         super().__init__()
         self.out_channels = out_channels
         self.net = nn.Sequential(
-            PeriodicConv2d(in_channels, hidden_dim),
+            PeriodicConv2d(in_channels, hidden_dim, kernel_size=kernel_size, dilation=dilation),
             nn.GELU(),
-            PeriodicConv2d(hidden_dim, hidden_dim),
+            PeriodicConv2d(hidden_dim, hidden_dim, kernel_size=kernel_size, dilation=dilation),
             nn.GELU(),
-            PeriodicConv2d(hidden_dim, out_channels),
+            PeriodicConv2d(hidden_dim, out_channels, kernel_size=kernel_size, dilation=dilation),
         )
 
     def forward(self, x):
