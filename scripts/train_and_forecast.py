@@ -52,13 +52,16 @@ def main():
     def save_checkpoint(model, epoch=None, val_loss=None):
         Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
         torch.save(
-            {"model": args.model, "channels": args.channels, "state_dict": model.state_dict(),
+            {"model": args.model, "channels": args.channels, "in_channels": model_kwargs["in_channels"],
+             "out_channels": model_kwargs["out_channels"], "state_dict": model.state_dict(),
              "mean": normalizer.mean, "std": normalizer.std, "epoch": epoch, "val_loss": val_loss},
             args.checkpoint,
         )
 
+    # No forcings yet, so the model's inputs and outputs are the same channels.
+    model_kwargs = {"in_channels": len(args.channels), "out_channels": len(args.channels)}
     print(f"Training {args.model} on {device}...")
-    model = MODELS[args.model](channels=len(args.channels))
+    model = MODELS[args.model](**model_kwargs)
     model = train_one_step(
         model, to_tensor(normalizer.normalize(train_raw)), device, args.epochs, args.batch_size, args.lr,
         val_tensor=val_tensor, patience=args.patience,

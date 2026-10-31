@@ -72,15 +72,24 @@ class Normalizer:
 
 
 class OneStepDataset(Dataset):
-    """Consecutive (x_t, x_{t+1}) pairs for training a 6-hour step model."""
+    """Consecutive (x_t, x_{t+1}) pairs for training a 6-hour step model.
 
-    def __init__(self, data_tensor):
+    If `forcing_tensor` (T, F, Lat, Lon) is given, the input is the state with the forcings for
+    that step appended as extra channels: (cat(x_t, f_t), x_{t+1}). The forcings are never targets.
+    """
+
+    def __init__(self, data_tensor, forcing_tensor=None):
         self.data = data_tensor  # (T, C, Lat, Lon)
+        self.forcing = forcing_tensor
+        if forcing_tensor is not None:
+            assert len(forcing_tensor) == len(data_tensor), "forcings must cover the same times as the data"
 
     def __len__(self):
         return len(self.data) - 1
 
     def __getitem__(self, idx):
+        if self.forcing is not None:
+            return torch.cat([self.data[idx], self.forcing[idx]]), self.data[idx + 1]
         return self.data[idx], self.data[idx + 1]
 
 

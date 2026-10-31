@@ -20,49 +20,58 @@ class PeriodicConv2d(nn.Module):
 class LinearRegressionModel(nn.Module):
     """A single 5x5 convolution with no activation: a local linear map from x_t to x_{t+1}."""
 
-    def __init__(self, channels=2):
+    def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.linear = PeriodicConv2d(channels, channels, kernel_size=5)
+        self.linear = PeriodicConv2d(in_channels, out_channels, kernel_size=5)
 
     def forward(self, x):
         return self.linear(x)
 
 
 class SimpleWeatherNet(nn.Module):
-    """Three-layer residual CNN: predicts the change x_{t+1} - x_t."""
+    """Three-layer residual CNN: predicts the change x_{t+1} - x_t.
 
-    def __init__(self, channels=2, hidden_dim=64):
+    The input is the state followed by any forcing channels, so in_channels >= out_channels.
+    The residual adds the change to the state channels only: forcings are inputs, never outputs.
+    """
+
+    def __init__(self, in_channels, out_channels, hidden_dim=64):
         super().__init__()
+        self.out_channels = out_channels
         self.net = nn.Sequential(
-            PeriodicConv2d(channels, hidden_dim),
+            PeriodicConv2d(in_channels, hidden_dim),
             nn.GELU(),
             PeriodicConv2d(hidden_dim, hidden_dim),
             nn.GELU(),
-            PeriodicConv2d(hidden_dim, channels),
+            PeriodicConv2d(hidden_dim, out_channels),
         )
 
     def forward(self, x):
-        return x + self.net(x)
+        return x[:, : self.out_channels] + self.net(x)
 
 
 class ComplexWeatherNet(nn.Module):
-    """ResNet-style CNN with a dilated block for a larger receptive field."""
+    """ResNet-style CNN with a dilated block for a larger receptive field.
 
-    def __init__(self, channels=2, hidden_dim=64):
+    Like SimpleWeatherNet, the residual adds the change to the state channels only.
+    """
+
+    def __init__(self, in_channels, out_channels, hidden_dim=64):
         super().__init__()
+        self.out_channels = out_channels
         self.gelu = nn.GELU()
-        self.in_layer = PeriodicConv2d(channels, hidden_dim)
+        self.in_layer = PeriodicConv2d(in_channels, hidden_dim)
         self.res1_1 = PeriodicConv2d(hidden_dim, hidden_dim)
         self.res1_2 = PeriodicConv2d(hidden_dim, hidden_dim)
         self.res2_1 = PeriodicConv2d(hidden_dim, hidden_dim, dilation=2)
         self.res2_2 = PeriodicConv2d(hidden_dim, hidden_dim, dilation=2)
-        self.out_layer = PeriodicConv2d(hidden_dim, channels)
+        self.out_layer = PeriodicConv2d(hidden_dim, out_channels)
 
     def forward(self, x):
         feat = self.gelu(self.in_layer(x))
         feat = self.gelu(feat + self.res1_2(self.gelu(self.res1_1(feat))))
         feat = self.gelu(feat + self.res2_2(self.gelu(self.res2_1(feat))))
-        return x + self.out_layer(feat)
+        return x[:, : self.out_channels] + self.out_layer(feat)
 
 
 MODELS = {
