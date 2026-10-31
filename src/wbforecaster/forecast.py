@@ -23,9 +23,43 @@ UNITS = {
 }
 
 
+def lat_weights(latitudes):
+    """Area weights for each latitude row, normalized to mean 1, exactly as WB2 computes them.
+
+    Each weight is the area of the row's grid cells: sin(upper edge) - sin(lower edge), the integral
+    of cos(latitude) across the cell. On the 64x32 grid this is practically identical to cos(latitude).
+    """
+    lat = np.radians(np.asarray(latitudes, dtype=np.float64))
+    edges = np.concatenate([[-np.pi / 2], (lat[:-1] + lat[1:]) / 2, [np.pi / 2]])
+    weights = np.sin(edges[1:]) - np.sin(edges[:-1])
+    return weights / weights.mean()
+
+
+class LatWeightedMSE(nn.Module):
+    """Mean squared error with each latitude row weighted by its area (see `lat_weights`).
+
+    The grid has as many cells near the poles as at the equator, but polar cells cover far less of the
+    globe. Plain MSE counts every cell equally, so it overweights the poles; WB2 weights by area when
+    scoring, and this loss trains on the same thing it's scored on. The weights have mean 1, so the
+    loss is on the same scale as plain MSE.
+    """
+
+    def __init__(self, latitudes):
+        super().__init__()
+        weights = torch.tensor(lat_weights(latitudes), dtype=torch.float32)
+        # Shape (1, 1, Lat, 1) to broadcast over (batch, channel, lat, lon). A buffer moves with .to(device).
+        self.register_buffer("weights", weights.view(1, 1, -1, 1))
+
+    def forward(self, prediction, target):
+        return ((prediction - target) ** 2 * self.weights).mean()
+
+
 def train_one_step(model, train_tensor, forcing_tensor, device, epochs=5, batch_size=16, lr=1e-3,
-                   val_tensor=None, val_forcing=None, patience=None, on_best=None):
+                   val_tensor=None, val_forcing=None, patience=None, on_best=None, latitudes=None):
     """Fit the model to predict the next 6-hour state with MSE loss on normalized data.
+
+    If `latitudes` is given, the loss weights each latitude row by its area (`LatWeightedMSE`), as WB2
+    does when scoring; otherwise every grid cell counts equally.
 
     `forcing_tensor` (and `val_forcing`) hold the forcings for the step starting at each time in
     `train_tensor` (and `val_tensor`), e.g. a `Forcings` over the same times, or None for no forcings.
@@ -42,7 +76,7 @@ def train_one_step(model, train_tensor, forcing_tensor, device, epochs=5, batch_
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(loader), eta_min=lr / 100)
-    criterion = nn.MSELoss()
+    criterion = (nn.MSELoss() if latitudes is None else LatWeightedMSE(latitudes)).to(device)
 
     best_loss, best_state, epochs_since_best = float("inf"), None, 0
     for epoch in range(epochs):
@@ -123,7 +157,6 @@ def rollout(model, test_raw, normalizer, lead_steps, device, init_indices=None, 
             state = model(x)
             forecast[b : b + len(idx), step] = normalizer.denormalize(state.cpu().numpy())
     return forecast
-
 
 def to_wb2_dataset(forecast, channels, init_times, latitudes, longitudes, step_hours=6):
     """Package a rollout as an xarray Dataset with WB2 dims (time, prediction_timedelta, [level], lat, lon)."""

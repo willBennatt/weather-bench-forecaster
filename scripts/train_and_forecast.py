@@ -38,6 +38,8 @@ def main():
     p.add_argument("--checkpoint", help="path to save model weights + normalization stats (best validation epoch)")
     p.add_argument("--no-forcings", action="store_true",
                    help="train on the state alone, without solar/time/static forcing inputs (the Phase 1 setup)")
+    p.add_argument("--lat-weighted-loss", action="store_true",
+                   help="weight the loss by grid-cell area (cos latitude), matching how WB2 scores forecasts")
     args = p.parse_args()
 
     device = get_device()
@@ -63,7 +65,8 @@ def main():
         Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {"model": args.model, "channels": args.channels, "in_channels": model_kwargs["in_channels"],
-             "out_channels": model_kwargs["out_channels"], "forcings": forcing_names, "state_dict": model.state_dict(),
+             "out_channels": model_kwargs["out_channels"], "forcings": forcing_names,
+             "lat_weighted_loss": args.lat_weighted_loss, "state_dict": model.state_dict(),
              "mean": normalizer.mean, "std": normalizer.std, "epoch": epoch, "val_loss": val_loss},
             args.checkpoint,
         )
@@ -76,6 +79,7 @@ def main():
     model = train_one_step(
         model, to_tensor(normalizer.normalize(train_raw)), forcings_for(train_slice), device, args.epochs,
         args.batch_size, args.lr, val_tensor=val_tensor, val_forcing=val_forcing, patience=args.patience,
+        latitudes=ds.latitude.values if args.lat_weighted_loss else None,
         on_best=save_checkpoint if args.checkpoint else None,
     )
     if args.checkpoint and val_tensor is None:

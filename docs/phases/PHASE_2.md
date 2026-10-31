@@ -41,3 +41,7 @@ python scripts/check_toa.py --output docs/images/phase2_toa.png
 The difference panels are scaled to the largest error shown (about 1.2 W/m²). `toa()` comes out slightly too high on the morning side of the daylit area and slightly too low on the afternoon side, which is the pattern a small timing offset produces. The sun's position changes TOA by up to ~6 W/m² per minute, so 1.2 W/m² is roughly a 10–15 second difference from ERA5's solar calculation.
 
 ## Step 3: Latitude-Weighted Loss
+
+The 64x32 grid has 64 cells in every latitude row, but a row near the pole covers far less of the globe than a row at the equator. Plain MSE counts every cell equally, so it spends as much effort on the tiny polar cells as on the huge tropical ones. WB2 weights each row by its area when scoring, so the model was being trained on a different objective from the one it's graded on.
+
+`LatWeightedMSE` in [forecast.py](../../src/wbforecaster/forecast.py) multiplies each squared error by its row's area weight before averaging. The weights come from `lat_weights`, which uses WB2's own formula, the area of the row's cells (sin(upper edge) − sin(lower edge)), normalized to mean 1. On this grid that's practically identical to cos(latitude). An error in the polar row now costs ~5% of the same error at the equator. Because the weights average to 1, the loss stays on the same scale as plain MSE. Turn it on with `--lat-weighted-loss`. Validation uses the same loss, so the best epoch is picked by the weighted score.
