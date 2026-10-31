@@ -15,7 +15,7 @@ import torch
 import xarray as xr
 
 from wbforecaster.data import (
-    DEFAULT_CHANNELS, ERA5_64X32, Normalizer, extract_channels, get_device, open_era5, open_memmap_splits,
+    DEFAULT_CHANNELS, ERA5_64X32, TENDENCY_SCALE_MIN, Normalizer, extract_channels, get_device, open_era5, open_memmap_splits,
     to_tensor,
 )
 from wbforecaster.forecast import rollout_batches, train_one_step, write_forecast_zarr
@@ -51,8 +51,16 @@ def main():
     p.add_argument("--pressure-weighted-loss", action="store_true",
                    help="also weight each channel by pressure level and surface variable, like GraphCast "
                         "(implies --lat-weighted-loss)")
+    p.add_argument("--tendency-norm", action="store_true",
+                   help="the model outputs each channel's 6-hour change in units of a typical change, and the "
+                        "loss measures errors in those units, so every channel's change counts equally")
+    p.add_argument("--tendency-min-scale", type=float, default=TENDENCY_SCALE_MIN,
+                   help="floor on a typical change / the field's std, so near-constant channels "
+                        f"don't dominate the loss (default: {TENDENCY_SCALE_MIN})")
     args = p.parse_args()
     args.lat_weighted_loss |= args.pressure_weighted_loss
+    if args.tendency_norm and args.model == "linear":
+        p.error("--tendency-norm needs a residual model: the linear model predicts the state, not the change")
 
     device = get_device()
     ds = open_era5(args.data)
@@ -93,7 +101,9 @@ def main():
             {"model": args.model, "channels": args.channels, "in_channels": model_kwargs["in_channels"],
              "out_channels": model_kwargs["out_channels"], "forcings": forcing_names,
              "hidden_dim": model_kwargs.get("hidden_dim"), "lat_weighted_loss": args.lat_weighted_loss,
-             "pressure_weighted_loss": args.pressure_weighted_loss, "state_dict": model.state_dict(),
+             "pressure_weighted_loss": args.pressure_weighted_loss, "tendency_norm": args.tendency_norm,
+             "tendency_min_scale": args.tendency_min_scale if args.tendency_norm else None,
+             "state_dict": model.state_dict(),
              "mean": normalizer.mean, "std": normalizer.std, "epoch": epoch, "val_loss": val_loss},
             args.checkpoint,
         )
@@ -103,13 +113,23 @@ def main():
     model_kwargs = {"in_channels": len(args.channels) + len(forcing_names), "out_channels": len(args.channels)}
     if args.model != "linear":  # a single convolution has no hidden layer
         model_kwargs["hidden_dim"] = args.hidden_dim
+    tendency_scale, tendency_kwargs = None, {}  # the scale is saved in the model's state_dict
+    if args.tendency_norm:
+        try:
+            tendency_scale, tendency_shift = normalizer.tendency_scale(args.tendency_min_scale)
+        except ValueError as e:
+            p.error(f"{args.memmap}: {e}")
+        floored = [c for c, s in zip(args.channels, tendency_scale) if s <= args.tendency_min_scale]
+        print(f"Tendency normalization: scale {tendency_scale.min():.3f}-{tendency_scale.max():.3f}"
+              + (f", floored at {args.tendency_min_scale}: {', '.join(floored)}" if floored else ""))
+        tendency_kwargs = {"tendency_scale": tendency_scale, "tendency_shift": tendency_shift}
     print(f"Training {args.model} on {device} with forcings: {forcing_names or 'none'}...")
-    model = MODELS[args.model](**model_kwargs)
+    model = MODELS[args.model](**model_kwargs, **tendency_kwargs)
     model = train_one_step(
         model, train_tensor, forcings_for(train_times), device, args.epochs,
         args.batch_size, args.lr, val_tensor=val_tensor, val_forcing=val_forcing, patience=args.patience,
         latitudes=ds.latitude.values if args.lat_weighted_loss else None,
-        channels=args.channels if args.pressure_weighted_loss else None,
+        channels=args.channels if args.pressure_weighted_loss else None, tendency_scale=tendency_scale,
         on_best=save_checkpoint if args.checkpoint else None,
     )
     if args.checkpoint and val_tensor is None:

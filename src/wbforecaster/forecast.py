@@ -41,12 +41,12 @@ class LatWeightedMSE(nn.Module):
     The grid has as many cells near the poles as at the equator, but polar cells cover far less of the
     globe. Plain MSE counts every cell equally, so it overweights the poles; WB2 weights by area when
     scoring, and this loss trains on the same thing it's scored on. The weights have mean 1, so the
-    loss is on the same scale as plain MSE.
+    loss is on the same scale as plain MSE. With `latitudes=None` every row counts equally.
     """
 
     def __init__(self, latitudes):
         super().__init__()
-        weights = torch.tensor(lat_weights(latitudes), dtype=torch.float32)
+        weights = torch.ones(1) if latitudes is None else torch.tensor(lat_weights(latitudes), dtype=torch.float32)
         # Shape (1, 1, Lat, 1) to broadcast over (batch, channel, lat, lon). A buffer moves with .to(device).
         self.register_buffer("weights", weights.view(1, 1, -1, 1))
 
@@ -78,15 +78,15 @@ def channel_weights(channels):
     return weights / weights.mean()
 
 
-class LatAndPressureWeightedMSE(LatWeightedMSE):
-    """`LatWeightedMSE` with each channel also weighted by `channel_weights` (pressure level, surface variable).
+class LatAndChannelWeightedMSE(LatWeightedMSE):
+    """`LatWeightedMSE` with each channel also multiplied by its own weight, `weights` (one per channel).
 
-    Both sets of weights have mean 1, so the loss stays on the same scale as plain MSE.
+    See `loss_channel_weights` for how the weights are chosen.
     """
 
-    def __init__(self, latitudes, channels):
+    def __init__(self, latitudes, weights):
         super().__init__(latitudes)
-        weights = torch.tensor(channel_weights(channels), dtype=torch.float32)
+        weights = torch.tensor(np.asarray(weights), dtype=torch.float32)
         # Shape (1, C, 1, 1) to broadcast over (batch, channel, lat, lon).
         self.register_buffer("channel_weights", weights.view(1, -1, 1, 1))
 
@@ -94,14 +94,32 @@ class LatAndPressureWeightedMSE(LatWeightedMSE):
         return ((prediction - target) ** 2 * self.weights * self.channel_weights).mean()
 
 
+def loss_channel_weights(channels=None, tendency_scale=None):
+    """Per-channel loss weights: pressure/surface weights (`channel_weights`), tendency weights, both, or None.
+
+    With tendency normalization each channel's squared error is divided by tendency_scale**2, i.e.
+    measured in units of that channel's typical 6-hour change, so every channel's change counts
+    equally however fast it moves. Those weights aren't renormalized: the loss is then in units of a
+    typical change (a model that predicts no change at all scores ~1), so it isn't comparable with
+    the loss of a run without tendency normalization.
+    """
+    weights = None if channels is None else channel_weights(channels)
+    if tendency_scale is not None:
+        tendency = 1 / np.asarray(tendency_scale, dtype=np.float64) ** 2
+        weights = tendency if weights is None else weights * tendency
+    return weights
+
+
 def train_one_step(model, train_tensor, forcing_tensor, device, epochs=5, batch_size=16, lr=1e-3,
-                   val_tensor=None, val_forcing=None, patience=None, on_best=None, latitudes=None, channels=None):
+                   val_tensor=None, val_forcing=None, patience=None, on_best=None, latitudes=None, channels=None,
+                   tendency_scale=None):
     """Fit the model to predict the next 6-hour state with MSE loss on normalized data.
 
     If `latitudes` is given, the loss weights each latitude row by its area (`LatWeightedMSE`), as WB2
     does when scoring; otherwise every grid cell counts equally. If `channels` (names like
-    "geopotential@500") is given too, each channel is also weighted by pressure level and surface
-    variable (`LatAndPressureWeightedMSE`).
+    "geopotential@500") is given, each channel is also weighted by pressure level and surface
+    variable. If `tendency_scale` is given (see `Normalizer.tendency_scale`), each channel's error is
+    also measured in units of its typical 6-hour change (`loss_channel_weights`).
 
     `forcing_tensor` (and `val_forcing`) hold the forcings for the step starting at each time in
     `train_tensor` (and `val_tensor`), e.g. a `Forcings` over the same times, or None for no forcings.
@@ -118,12 +136,13 @@ def train_one_step(model, train_tensor, forcing_tensor, device, epochs=5, batch_
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(loader), eta_min=lr / 100)
-    if latitudes is None:
-        criterion = nn.MSELoss()
-    elif channels is None:
+    weights = loss_channel_weights(channels, tendency_scale)
+    if weights is not None:
+        criterion = LatAndChannelWeightedMSE(latitudes, weights)
+    elif latitudes is not None:
         criterion = LatWeightedMSE(latitudes)
     else:
-        criterion = LatAndPressureWeightedMSE(latitudes, channels)
+        criterion = nn.MSELoss()
     criterion = criterion.to(device)
 
     best_loss, best_state, epochs_since_best = float("inf"), None, 0
