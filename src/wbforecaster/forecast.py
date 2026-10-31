@@ -23,9 +23,12 @@ UNITS = {
 }
 
 
-def train_one_step(model, train_tensor, device, epochs=5, batch_size=16, lr=1e-3,
-                   val_tensor=None, patience=None, on_best=None):
+def train_one_step(model, train_tensor, forcing_tensor, device, epochs=5, batch_size=16, lr=1e-3,
+                   val_tensor=None, val_forcing=None, patience=None, on_best=None):
     """Fit the model to predict the next 6-hour state with MSE loss on normalized data.
+
+    `forcing_tensor` (and `val_forcing`) hold the forcings for the step starting at each time in
+    `train_tensor` (and `val_tensor`), e.g. a `Forcings` over the same times, or None for no forcings.
 
     The learning rate follows a cosine decay from `lr` to `lr / 100` over all training steps:
     large steps early to make fast progress, small steps late to settle into a minimum.
@@ -35,7 +38,7 @@ def train_one_step(model, train_tensor, device, epochs=5, batch_size=16, lr=1e-3
     is called each time the validation loss improves (e.g. to save a checkpoint), and training
     stops early after `patience` epochs without improvement.
     """
-    loader = DataLoader(OneStepDataset(train_tensor), batch_size=batch_size, shuffle=True)
+    loader = DataLoader(OneStepDataset(train_tensor, forcing_tensor), batch_size=batch_size, shuffle=True)
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(loader), eta_min=lr / 100)
@@ -57,7 +60,7 @@ def train_one_step(model, train_tensor, device, epochs=5, batch_size=16, lr=1e-3
         message = f"Epoch {epoch + 1}/{epochs} - Loss: {total_loss / len(loader):.5f}"
 
         if val_tensor is not None:
-            val_loss = evaluate_loss(model, val_tensor, device, criterion)
+            val_loss = evaluate_loss(model, val_tensor, device, criterion, val_forcing)
             message += f" - Val loss: {val_loss:.5f}"
             if val_loss < best_loss:
                 best_loss, epochs_since_best = val_loss, 0
@@ -80,10 +83,10 @@ def train_one_step(model, train_tensor, device, epochs=5, batch_size=16, lr=1e-3
 
 
 @torch.no_grad()
-def evaluate_loss(model, data_tensor, device, criterion, batch_size=256):
+def evaluate_loss(model, data_tensor, device, criterion, forcing_tensor=None, batch_size=256):
     """Average one-step loss over a dataset, without updating the model."""
     model.eval()
-    loader = DataLoader(OneStepDataset(data_tensor), batch_size=batch_size)
+    loader = DataLoader(OneStepDataset(data_tensor, forcing_tensor), batch_size=batch_size)
     total = 0.0
     for x_batch, y_batch in loader:
         x_batch, y_batch = x_batch.to(device), y_batch.to(device)
@@ -92,8 +95,12 @@ def evaluate_loss(model, data_tensor, device, criterion, batch_size=256):
 
 
 @torch.no_grad()
-def rollout(model, test_raw, normalizer, lead_steps, device, init_indices=None, batch_size=64):
+def rollout(model, test_raw, normalizer, lead_steps, device, init_indices=None, batch_size=64, forcings=None):
     """Run the model autoregressively from each initial time in `init_indices` (default: all that fit).
+
+    `forcings` is a `Forcings` over the same times as `test_raw`, or None for a model without forcings.
+    Only the initial state comes from the data: at every later step the input is the model's own
+    previous prediction plus the forcings computed for that step's time.
 
     Returns an array of shape (num_inits, lead_steps + 1, C, Lat, Lon) in physical units,
     where lead index 0 is the initial condition itself.
@@ -108,7 +115,12 @@ def rollout(model, test_raw, normalizer, lead_steps, device, init_indices=None, 
         forecast[b : b + len(idx), 0] = test_raw[idx]
         state = torch.tensor(normalizer.normalize(test_raw[idx]), dtype=torch.float32, device=device)
         for step in range(1, lead_steps + 1):
-            state = model(state)
+            x = state
+            if forcings is not None:
+                # This step starts (step - 1) * 6 h after each initial time.
+                f = forcings.at(forcings.times[idx + step - 1])
+                x = torch.cat([state, torch.from_numpy(f).to(device)], dim=1)  # state first, then forcings
+            state = model(x)
             forecast[b : b + len(idx), step] = normalizer.denormalize(state.cpu().numpy())
     return forecast
 
