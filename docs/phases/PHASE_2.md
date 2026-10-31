@@ -108,6 +108,8 @@ Below are the plots of root mean squared error (RMSE) and anomaly correlation co
 
 ![phase 2 skill curves](../images/phase2_skill_curves.png)
 
+The goal was achieved: models using forcing parameters beat persistence at 24 hour predictions by a wide margin for both T2M and Z500.
+
 Observations:
 
 - Using the latitude-weighted loss function gave similar, but slightly worse, results than the phase 1 model.
@@ -146,3 +148,8 @@ Now let's examine the same Storm Ciara forecast as Phase 1: started at 8 Feb 202
 The model using both forcing and latitude-weighted loss performed better than the phase 1 model for some time forecasts but performed surprisingly worse for the 1-day temperature forecast in this scenario. Another surprising result is that the error blew up even worse over time than the phase one model - after 10 days, it predicted a temperature of 31,000,000 K compared to 56.8 K from the phase 1 model and a true temperature of 279.4 K.
 
 It's possible that the error is worse after 10 days because the model learned to make bigger changes with each step to account for day/night swings, which then leads its error to grow exponentially worse over time.
+
+### Next Steps
+
+- Multi-step training to address the error blowup after 2 days (phase 5)
+- Predicting the full atmospheric state instead of only T2M and Z500 (phase 3)
