@@ -64,6 +64,13 @@ class Normalizer:
         self.mean = train_raw.mean(axis=(0, 2, 3), keepdims=True)
         self.std = train_raw.std(axis=(0, 2, 3), keepdims=True) + 1e-6
 
+    @classmethod
+    def from_stats(cls, mean, std):
+        """A normalizer with statistics computed elsewhere, e.g. a year at a time by build_memmap.py."""
+        normalizer = cls.__new__(cls)
+        normalizer.mean, normalizer.std = mean, std
+        return normalizer
+
     def normalize(self, x):
         return (x - self.mean) / self.std
 
@@ -71,11 +78,35 @@ class Normalizer:
         return x * self.std + self.mean
 
 
+def open_memmap_splits(directory):
+    """Open a build_memmap.py cache: its channel names, a Normalizer, and {split: (data, times)}.
+
+    Each `data` is a normalized float16 array of shape (T, C, Lat, Lon), memory-mapped: rows are read
+    from disk when indexed, so the full array never has to fit in RAM.
+    """
+    directory = Path(directory)
+    stats = np.load(directory / "stats.npz")
+    splits = {}
+    # The times file is written last, so a split interrupted mid-write isn't listed.
+    for times_path in sorted(directory.glob("*_times.npy")):
+        name = times_path.name.removesuffix("_times.npy")
+        splits[name] = (np.load(directory / f"{name}.npy", mmap_mode="r"), np.load(times_path))
+    return [str(c) for c in stats["channels"]], Normalizer.from_stats(stats["mean"], stats["std"]), splits
+
+
+def _as_tensor(x):
+    """Rows of a memmap come back as float16 numpy arrays; tensors pass through unchanged."""
+    return torch.from_numpy(np.asarray(x, dtype=np.float32)) if isinstance(x, np.ndarray) else x
+
+
 class OneStepDataset(Dataset):
     """Consecutive (x_t, x_{t+1}) pairs for training a 6-hour step model.
 
     If `forcing_tensor` (T, F, Lat, Lon) is given, the input is the state with the forcings for
     that step appended as extra channels: (cat(x_t, f_t), x_{t+1}). The forcings are never targets.
+
+    `data_tensor` can also be a numpy array or memmap (e.g. from `open_memmap_splits`): each sample
+    is then read and converted to float32 only when it's requested.
     """
 
     def __init__(self, data_tensor, forcing_tensor=None):
@@ -88,9 +119,10 @@ class OneStepDataset(Dataset):
         return len(self.data) - 1
 
     def __getitem__(self, idx):
+        x, y = _as_tensor(self.data[idx]), _as_tensor(self.data[idx + 1])
         if self.forcing is not None:
-            return torch.cat([self.data[idx], self.forcing[idx]]), self.data[idx + 1]
-        return self.data[idx], self.data[idx + 1]
+            return torch.cat([x, self.forcing[idx]]), y
+        return x, y
 
 
 def to_tensor(array):

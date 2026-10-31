@@ -2,6 +2,10 @@
 
 Example (defaults match the v0 notebook setup, plus learning-rate decay):
     python scripts/train_and_forecast.py --model simple --output forecast_simple.zarr
+
+With `--memmap`, training and validation data are read from disk a batch at a time (a
+build_memmap.py cache), for channel sets too large to hold in RAM. The cache sets the channels,
+normalization and train/val periods; `--data` is still needed for the forcings and the test period.
 """
 import argparse
 from pathlib import Path
@@ -10,7 +14,8 @@ import numpy as np
 import torch
 
 from wbforecaster.data import (
-    DEFAULT_CHANNELS, ERA5_64X32, Normalizer, extract_channels, get_device, open_era5, to_tensor,
+    DEFAULT_CHANNELS, ERA5_64X32, Normalizer, extract_channels, get_device, open_era5, open_memmap_splits,
+    to_tensor,
 )
 from wbforecaster.forecast import rollout, to_wb2_dataset, train_one_step
 from wbforecaster.models import MODELS
@@ -21,7 +26,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", choices=MODELS, default="simple")
     p.add_argument("--data", default=ERA5_64X32, help="WB2 bucket URL or a local cache from download_era5.py")
-    p.add_argument("--channels", nargs="+", default=DEFAULT_CHANNELS, help="e.g. 2m_temperature geopotential@500")
+    p.add_argument("--channels", nargs="+", help=f"e.g. 2m_temperature geopotential@500 (default: {' '.join(DEFAULT_CHANNELS)})")
+    p.add_argument("--memmap", help="a build_memmap.py cache to train from; sets the channels, normalization and train/val periods")
     p.add_argument("--train-start", default="2018-01-01")
     p.add_argument("--train-end", default="2018-12-31")
     p.add_argument("--test-start", default="2020-01-01")
@@ -45,21 +51,35 @@ def main():
     device = get_device()
     ds = open_era5(args.data)
 
-    def forcings_for(period):
-        """Forcings aligned with `period`'s times (forcing i is for the step starting at time i), or None."""
-        return None if args.no_forcings else Forcings(period.time.values, ds)
+    def forcings_for(times):
+        """Forcings aligned with `times` (forcing i is for the step starting at time i), or None."""
+        return None if args.no_forcings else Forcings(times, ds)
 
-    print("Loading training data...")
-    train_slice = ds.sel(time=slice(args.train_start, args.train_end))
-    train_raw = extract_channels(train_slice, args.channels)
-    normalizer = Normalizer(train_raw)
     val_tensor = val_forcing = None
-    if args.val_start and args.val_end:
-        print("Loading validation data...")
-        val_slice = ds.sel(time=slice(args.val_start, args.val_end))
-        val_raw = extract_channels(val_slice, args.channels)
-        val_tensor = to_tensor(normalizer.normalize(val_raw))  # train statistics, never validation's own
-        val_forcing = forcings_for(val_slice)
+    if args.memmap:
+        channels, normalizer, splits = open_memmap_splits(args.memmap)
+        if args.channels and args.channels != channels:
+            p.error(f"--channels doesn't match the channels {args.memmap} was built with")
+        args.channels = channels
+        train_tensor, train_times = splits["train"]
+        print(f"Training on {args.memmap}: {len(train_times)} time steps from {str(train_times[0])[:10]} "
+              f"to {str(train_times[-1])[:10]} (--train-start/--train-end/--val-start/--val-end are ignored)")
+        if "val" in splits:
+            val_tensor, val_times = splits["val"]
+            val_forcing = forcings_for(val_times)
+    else:
+        args.channels = args.channels or DEFAULT_CHANNELS
+        print("Loading training data...")
+        train_slice = ds.sel(time=slice(args.train_start, args.train_end))
+        train_raw = extract_channels(train_slice, args.channels)
+        normalizer = Normalizer(train_raw)
+        train_tensor, train_times = to_tensor(normalizer.normalize(train_raw)), train_slice.time.values
+        if args.val_start and args.val_end:
+            print("Loading validation data...")
+            val_slice = ds.sel(time=slice(args.val_start, args.val_end))
+            val_raw = extract_channels(val_slice, args.channels)
+            val_tensor = to_tensor(normalizer.normalize(val_raw))  # train statistics, never validation's own
+            val_forcing = forcings_for(val_slice.time.values)
 
     def save_checkpoint(model, epoch=None, val_loss=None):
         Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +97,7 @@ def main():
     print(f"Training {args.model} on {device} with forcings: {forcing_names or 'none'}...")
     model = MODELS[args.model](**model_kwargs)
     model = train_one_step(
-        model, to_tensor(normalizer.normalize(train_raw)), forcings_for(train_slice), device, args.epochs,
+        model, train_tensor, forcings_for(train_times), device, args.epochs,
         args.batch_size, args.lr, val_tensor=val_tensor, val_forcing=val_forcing, patience=args.patience,
         latitudes=ds.latitude.values if args.lat_weighted_loss else None,
         on_best=save_checkpoint if args.checkpoint else None,
@@ -92,7 +112,7 @@ def main():
     if args.init_hours:
         init_indices = init_indices[np.isin(test_slice.time.dt.hour.values[init_indices], args.init_hours)]
     forecast = rollout(model, extract_channels(test_slice, args.channels), normalizer, args.lead_steps, device,
-                       init_indices, forcings=forcings_for(test_slice))
+                       init_indices, forcings=forcings_for(test_slice.time.values))
 
     out = to_wb2_dataset(forecast, args.channels, init_times[init_indices], ds.latitude.values, ds.longitude.values)
     out.to_zarr(args.output, mode="w")
