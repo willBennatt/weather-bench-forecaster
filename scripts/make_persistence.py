@@ -17,7 +17,8 @@ def main():
     persistence = initial.expand_dims(prediction_timedelta=forecast.prediction_timedelta).transpose(*forecast.dims)
     for var in persistence.variables.values():
         var.encoding = {}
-    persistence.chunk({"time": 100}).to_zarr(dst, mode="w")
+    # One forecast per chunk, like our forecasts: with 39 channels a 100-forecast chunk is ~250 MB per variable.
+    persistence.chunk({"time": 1}).to_zarr(dst, mode="w")
     print(f"Wrote {dst}")
 
 

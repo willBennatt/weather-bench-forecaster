@@ -12,12 +12,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import xarray as xr
 
 from wbforecaster.data import (
     DEFAULT_CHANNELS, ERA5_64X32, Normalizer, extract_channels, get_device, open_era5, open_memmap_splits,
     to_tensor,
 )
-from wbforecaster.forecast import rollout, to_wb2_dataset, train_one_step
+from wbforecaster.forecast import rollout_batches, train_one_step, write_forecast_zarr
 from wbforecaster.models import MODELS
 from wbforecaster.forcings import Forcings
 
@@ -111,14 +112,13 @@ def main():
     init_indices = np.arange(len(init_times))
     if args.init_hours:
         init_indices = init_indices[np.isin(test_slice.time.dt.hour.values[init_indices], args.init_hours)]
-    forecast = rollout(model, extract_channels(test_slice, args.channels), normalizer, args.lead_steps, device,
-                       init_indices, forcings=forcings_for(test_slice.time.values))
-
-    out = to_wb2_dataset(forecast, args.channels, init_times[init_indices], ds.latitude.values, ds.longitude.values)
-    out.to_zarr(args.output, mode="w")
+    # Written a batch at a time: a year of 10-day forecasts for 39 channels is ~10 GB.
+    batches = rollout_batches(model, extract_channels(test_slice, args.channels), normalizer, args.lead_steps,
+                              device, init_indices, forcings=forcings_for(test_slice.time.values))
+    write_forecast_zarr(batches, args.output, args.channels, init_times[init_indices], ds.latitude.values,
+                        ds.longitude.values)
     print(f"Wrote {args.output}")
-    print(out)
-
+    print(xr.open_zarr(args.output))
 
 if __name__ == "__main__":
     main()

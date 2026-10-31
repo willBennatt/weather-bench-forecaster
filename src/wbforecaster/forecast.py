@@ -129,24 +129,26 @@ def evaluate_loss(model, data_tensor, device, criterion, forcing_tensor=None, ba
 
 
 @torch.no_grad()
-def rollout(model, test_raw, normalizer, lead_steps, device, init_indices=None, batch_size=64, forcings=None):
+def rollout_batches(model, test_raw, normalizer, lead_steps, device, init_indices=None, batch_size=64,
+                    forcings=None):
     """Run the model autoregressively from each initial time in `init_indices` (default: all that fit).
 
     `forcings` is a `Forcings` over the same times as `test_raw`, or None for a model without forcings.
     Only the initial state comes from the data: at every later step the input is the model's own
     previous prediction plus the forcings computed for that step's time.
 
-    Returns an array of shape (num_inits, lead_steps + 1, C, Lat, Lon) in physical units,
-    where lead index 0 is the initial condition itself.
+    Forecasts from different start times are independent, so they run `batch_size` at a time. Yields
+    `(start, forecast)` for each batch, where `forecast` covers `init_indices[start : start + len(forecast)]`
+    and has shape (batch, lead_steps + 1, C, Lat, Lon) in physical units; lead index 0 is the initial
+    condition itself. Only one batch is in memory at a time, so a full set of forecasts never has to fit.
     """
     if init_indices is None:
         init_indices = np.arange(len(test_raw) - lead_steps)
-    forecast = np.zeros((len(init_indices), lead_steps + 1, *test_raw.shape[1:]), dtype=np.float32)
     model.eval()
-    # Forecasts from different start times are independent, so run them in batches.
     for b in range(0, len(init_indices), batch_size):
         idx = init_indices[b : b + batch_size]
-        forecast[b : b + len(idx), 0] = test_raw[idx]
+        forecast = np.zeros((len(idx), lead_steps + 1, *test_raw.shape[1:]), dtype=np.float32)
+        forecast[:, 0] = test_raw[idx]
         state = torch.tensor(normalizer.normalize(test_raw[idx]), dtype=torch.float32, device=device)
         for step in range(1, lead_steps + 1):
             x = state
@@ -155,8 +157,34 @@ def rollout(model, test_raw, normalizer, lead_steps, device, init_indices=None, 
                 f = forcings.at(forcings.times[idx + step - 1])
                 x = torch.cat([state, torch.from_numpy(f).to(device)], dim=1)  # state first, then forcings
             state = model(x)
-            forecast[b : b + len(idx), step] = normalizer.denormalize(state.cpu().numpy())
-    return forecast
+            forecast[:, step] = normalizer.denormalize(state.cpu().numpy())
+        yield b, forecast
+
+
+def rollout(model, test_raw, normalizer, lead_steps, device, init_indices=None, batch_size=64, forcings=None):
+    """All of `rollout_batches` in one array of shape (num_inits, lead_steps + 1, C, Lat, Lon).
+
+    Fine for a few channels; for many channels and a year of forecasts use `write_forecast_zarr`.
+    """
+    batches = rollout_batches(model, test_raw, normalizer, lead_steps, device, init_indices, batch_size, forcings)
+    return np.concatenate([forecast for _, forecast in batches])
+
+
+def write_forecast_zarr(batches, path, channels, init_times, latitudes, longitudes):
+    """Write `rollout_batches` output to a WB2-format Zarr store one batch at a time.
+
+    Each batch is appended along `time`. The store is chunked one forecast (init time) per chunk,
+    which is how the WB2 evaluation reads it.
+    """
+    for start, forecast in batches:
+        ds = to_wb2_dataset(forecast, channels, init_times[start : start + len(forecast)], latitudes, longitudes)
+        if start == 0:
+            encoding = {var: {"chunks": (1, *ds[var].shape[1:])} for var in ds.data_vars}
+            ds.to_zarr(path, mode="w", encoding=encoding)
+        else:
+            ds.to_zarr(path, append_dim="time")
+        print(f"  wrote forecasts {start + len(forecast)}/{len(init_times)}", flush=True)
+
 
 def to_wb2_dataset(forecast, channels, init_times, latitudes, longitudes, step_hours=6):
     """Package a rollout as an xarray Dataset with WB2 dims (time, prediction_timedelta, [level], lat, lon)."""

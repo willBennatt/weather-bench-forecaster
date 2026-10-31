@@ -9,6 +9,8 @@ Examples:
     python scripts/graph_skill_curves.py evals/results_simple_2mtemp_z500
     python scripts/graph_skill_curves.py simple=evals/results_simple complex=evals/results_complex \\
         --reference hres keisler --output evals/skill_curves.png
+    python scripts/graph_skill_curves.py evals/phase3/simple_all_channels \
+        --variables geopotential@500 temperature@850 2m_temperature   # a few of many channels
 """
 import argparse
 import urllib.request
@@ -17,6 +19,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+
+from wbforecaster.data import parse_channel
 
 # Model curves take these hues in order; baselines are dashed/dotted gray; WB2 references are thin.
 MODEL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
@@ -30,7 +34,8 @@ REFERENCE_STYLES = [{"color": "#9e9d97", "linestyle": "-"}, {"color": "#9e9d97",
 REFERENCE_URL = "https://storage.googleapis.com/weatherbench2/benchmark_results/{name}_vs_era5_64x32_2020.nc"
 
 UNITS = {"2m_temperature": "K", "geopotential": "m²/s²", "temperature": "K", "mean_sea_level_pressure": "Pa",
-         "specific_humidity": "kg/kg", "10m_wind_speed": "m/s"}
+         "specific_humidity": "kg/kg", "10m_wind_speed": "m/s", "u_component_of_wind": "m/s",
+         "v_component_of_wind": "m/s", "10m_u_component_of_wind": "m/s", "10m_v_component_of_wind": "m/s"}
 
 
 def parse_inputs(paths):
@@ -143,6 +148,8 @@ def main():
     p.add_argument("evals", nargs="+", help="results directories or deterministic.nc files, optionally NAME=PATH")
     p.add_argument("--reference", nargs="*", default=[],
                    help="published WB2 models to overlay, e.g. hres keisler graphcast pangu")
+    p.add_argument("--variables", nargs="+",
+                   help="only plot these, e.g. geopotential@500 2m_temperature (default: everything evaluated)")
     p.add_argument("--metrics", nargs="+", default=["rmse", "acc"], choices=["rmse", "acc", "bias", "mae"])
     p.add_argument("--output", default="evals/skill_curves.png", help="where to save the figure")
     p.add_argument("--show", action="store_true", help="also open an interactive window")
@@ -155,6 +162,12 @@ def main():
     reference_ds = {name: load_reference(name, cache) for name in args.reference}
 
     rows = variables(next(iter(model_ds.values())))
+    if args.variables:
+        wanted = [parse_channel(v) for v in args.variables]
+        missing = [v for v, pair in zip(args.variables, wanted) if pair not in rows]
+        if missing:
+            p.error(f"not in the results: {', '.join(missing)}")
+        rows = wanted
     fig, axes = plt.subplots(len(rows), len(args.metrics), figsize=(6.5 * len(args.metrics), 3.8 * len(rows)),
                              squeeze=False)
     for r, (var, level) in enumerate(rows):

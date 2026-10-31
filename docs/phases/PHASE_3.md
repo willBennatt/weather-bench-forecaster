@@ -29,7 +29,7 @@ python scripts/download_era5.py --output data/era5_64x32_all_channels --start-ye
 Then build the memmap cache with the same `--channels` list:
 
 ```sh
-python scripts/build_memmap.py --data data/era5_64x32_all_channels --output data/memmap/era5_64x32_all_channels --train-start 1979-01-01 --train-end 2015-12-31 --val-start 2016-01-01 --val-end 2017-12-31 --channels <same list>
+python scripts/build_memmap.py --data data/era5_64x32_all_channels --output data/memmap/era5_64x32_all_channels --train-start 1979-01-01 --train-end 2015-12-31 --val-start 2016-01-01 --val-end 2017-12-31 --channels geopotential@50 geopotential@250 geopotential@500 geopotential@700 geopotential@850 geopotential@925 geopotential@1000 temperature@50 temperature@250 temperature@500 temperature@700 temperature@850 temperature@925 temperature@1000 u_component_of_wind@50 u_component_of_wind@250 u_component_of_wind@500 u_component_of_wind@700 u_component_of_wind@850 u_component_of_wind@925 u_component_of_wind@1000 v_component_of_wind@50 v_component_of_wind@250 v_component_of_wind@500 v_component_of_wind@700 v_component_of_wind@850 v_component_of_wind@925 v_component_of_wind@1000 specific_humidity@50 specific_humidity@250 specific_humidity@500 specific_humidity@700 specific_humidity@850 specific_humidity@925 specific_humidity@1000 2m_temperature 10m_u_component_of_wind 10m_v_component_of_wind mean_sea_level_pressure
 ```
 
 Both scripts skip work that's already done, so they can be resumed after an interruption. To change the channels or the training period, build into a new `--output`, since the normalization statistics depend on both.
@@ -38,16 +38,16 @@ Train with `--data data/era5_64x32_all_channels --memmap data/memmap/era5_64x32_
 
 ## Step 2: Train and Evaluate
 
-Once the memmaps are created, train the model:
+Once the memmaps are created, train the model. The rollout now writes the forecast to the zarr one batch of start times at a time: a year of 10-day forecasts for 39 channels is ~10 GB, which wouldn't fit in memory all at once.:
 
 ```sh
-python scripts/train_and_forecast.py --data data/era5_64x32_all_channels --memmap data/memmap/era5_64x32_all_channels --model simple --train-start 1979-01-01 --train-end 2015-12-31 --val-start 2016-01-01 --val-end 2017-12-31 --test-start 2020-01-01 --test-end 2020-12-31 --lead-steps 40 --init-hours 0 12 --epochs 5 --patience 2 --lat-weighted-loss --output output/phase3/forecast_simple_all_channels.zarr --checkpoint checkpoints/phase3/simple_all_channels.pt
+python scripts/train_and_forecast.py --data data/era5_64x32_all_channels --memmap data/memmap/era5_64x32_all_channels --model simple --test-start 2020-01-01 --test-end 2020-12-31 --lead-steps 40 --init-hours 0 12 --epochs 5 --patience 2 --lat-weighted-loss --output output/phase3/forecast_simple_all_channels.zarr --checkpoint checkpoints/phase3/simple_all_channels.pt
 ```
 
 Then cache the new channels for evaluation:
 
 ```sh
-python scripts/cache_eval_data.py --start 2020-01-01 --end 2020-12-31 --variables geopotential temperature u_component_of_wind v_component_of_wind specific_humidity 2m_temperature 10m_u_component_of_wind 10m_v_component_of_wind mean_sea_level_pressure --levels 50,250,500,700,850,925,1000
+python scripts/cache_eval_data.py --start 2020-01-01 --end 2020-12-31 --variables geopotential temperature u_component_of_wind v_component_of_wind specific_humidity 2m_temperature 10m_u_component_of_wind 10m_v_component_of_wind mean_sea_level_pressure --levels 50 250 500 700 850 925 1000
 ```
 
 Then evaluate. Include baseline to get persistence and climatology models for the new channels:
@@ -56,8 +56,14 @@ Then evaluate. Include baseline to get persistence and climatology models for th
 WB2_DIR='../weatherbench2' BASELINES=1 scripts/evaluate.sh output/phase3/forecast_simple_all_channels.zarr evals/phase3/simple_all_channels/ geopotential,temperature,u_component_of_wind,v_component_of_wind,specific_humidity,2m_temperature,10m_u_component_of_wind,10m_v_component_of_wind,mean_sea_level_pressure 50,250,500,700,850,925,1000
 ```
 
-Finally, plot the new model versus persistence and climatology baselines for all channels:
+Finally, plot the results. With 39 channels, skill curves for every channel would be 78 panels, so the overview is a scorecard: one row per channel, one column per lead time, colored by RMSE relative to persistence (blue = less error, red = more):
 
 ```sh
-python scripts/graph_skill_curves.py simple=evals/phase3/simple_all_channels --output docs/images/phase3_skill_curves.png
+python scripts/scorecard.py evals/phase3/simple_all_channels --output docs/images/phase3_scorecard.png
+```
+
+Then skill curves for the WB2 headline variables only:
+
+```sh
+python scripts/graph_skill_curves.py simple=evals/phase3/simple_all_channels --variables geopotential@500 temperature@850 specific_humidity@700 u_component_of_wind@850 2m_temperature mean_sea_level_pressure 10m_u_component_of_wind --output docs/images/phase3_skill_curves.png
 ```
