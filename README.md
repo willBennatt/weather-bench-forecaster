@@ -4,30 +4,24 @@ A learning project in **machine-learning weather prediction**. It trains small n
 
 Everything runs on free GPUs (Google Colab T4 or Kaggle). The goal is to understand the techniques, not to beat state-of-the-art models.
 
+## Learning Strategy
+
+The goal of this project is to refresh my machine-learning skills while learning about weather data and analysis. The goal is not to become an expert in weather forecasting, but rather to quickly gain an overall understanding of the field and types of work being done. I am trying out an AI-as-teacher strategy to see whether I can learn faster with guidance. For more information, see [Learning Strategy](docs/LEARNING.md).
+
 ## How it works
 
 New to the data? [`docs/DATA.md`](docs/DATA.md) shows the grid, variables, Zarr layout and the actual arrays with pictures.
 
 1. **Data.** WeatherBench 2 hosts ERA5 regridded to a coarse **64 × 32 global grid (5.625°, ~600 km cells) every 6 hours**, from 1959 to 2023, in a public Zarr store on Google Cloud Storage. We stream a subset of variables and stack them into a `(time, channel, lat, lon)` array, e.g. 2 m temperature and 500 hPa geopotential.
 2. **Normalization.** Each channel is z-scored with means and standard deviations computed on the training years only.
-3. **Model.** A convolutional network maps the state at time *t* to the state at *t* + 6 h. The convolutions use **periodic padding in longitude**, because the globe wraps around at 0°/360°. The CNNs are *residual*: they predict the change, not the full field.
+3. **Model.** A convolutional network maps the state at time _t_ to the state at _t_ + 6 h. The convolutions use **periodic padding in longitude**, because the globe wraps around at 0°/360°. The CNNs are _residual_: they predict the change, not the full field.
 4. **Training.** Minimize the MSE between the predicted and actual next state over consecutive 6-hour pairs.
 5. **Autoregressive rollout.** To forecast 48 h ahead, apply the model 8 times, feeding each prediction back in as the next input. This is how GraphCast and friends work too.
 6. **Evaluation.** Forecasts are exported in WB2's `(time, prediction_timedelta, [level], latitude, longitude)` Zarr format and scored against ERA5 with the official `weatherbench2/scripts/evaluate.py`. It reports area-weighted RMSE, bias and ACC, plus persistence and climatology baselines.
 
-## Results so far (v0)
+## Results so far
 
-[`notebooks/01_t2m_z500_model_comparison.ipynb`](notebooks/01_t2m_z500_model_comparison.ipynb) compares three models trained on 2018 and tested on 1–15 Jan 2020:
-
-| Model | Description |
-|---|---|
-| Linear | A single 5×5 periodic convolution, no nonlinearity |
-| Simple CNN | 3 conv layers, GELU, residual |
-| Complex CNN | ResNet-style blocks plus a dilated block for a larger receptive field |
-
-![v0 T2M skill curve](docs/images/v0_t2m_skill_curve.png)
-
-The CNNs clearly beat the linear model. **But at 24 h they're still worse than simply persisting the initial state** (WB2 persistence T2M RMSE at 24 h: 1.74 K; climatology: 2.40 K). The main reasons: the model has no knowledge of the time of day or season, it sees only two variables, and it was trained only on single steps. The [roadmap](docs/ROADMAP.md) has the full diagnosis and fixes.
+For current progress, see [docs/phases/](docs/phases/).
 
 ## Roadmap
 
@@ -68,7 +62,7 @@ The CNNs clearly beat the linear model. **But at 24 h they're still worse than s
 
 ### In Google Colab (recommended, free T4 GPU)
 
-Open the notebook straight from GitHub: **File → Open notebook → GitHub**, tick *Include private repos*, and choose this repo. Set **Runtime → Change runtime type → T4 GPU**. Use **File → Save a copy in GitHub** to commit changes back.
+Open the notebook straight from GitHub: **File → Open notebook → GitHub**, tick _Include private repos_, and choose this repo. Set **Runtime → Change runtime type → T4 GPU**. Use **File → Save a copy in GitHub** to commit changes back.
 
 To use the `wbforecaster` package from Colab, store a read-only GitHub token as a Colab Secret named `GH_TOKEN`, then run:
 
@@ -133,4 +127,4 @@ Results are written to `eval_results_simple/deterministic.nc`, with the baseline
 ## Data and acknowledgements
 
 - ERA5 reanalysis: Hersbach et al. 2020, Copernicus Climate Change Service.
-- WeatherBench 2: Rasp et al. 2024, *JAMES*. Data at `gs://weatherbench2` (public, no credentials needed).
+- WeatherBench 2: Rasp et al. 2024, _JAMES_. Data at `gs://weatherbench2` (public, no credentials needed).
